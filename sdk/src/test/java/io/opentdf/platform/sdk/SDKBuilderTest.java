@@ -164,10 +164,15 @@ public class SDKBuilderTest {
             assertThat(body).contains("grant_type=client_credentials");
 
             // now call KAS _on a different server_ and make sure that the interceptors provide us with auth tokens
-            int kasPort = kasServer.getPort();
-            SDK.KASInfo kasInfo = () -> "localhost:" + kasPort;
-            services.kas().unwrap(kasInfo, new SDK.Policy() {});
+            var keyAccess = new Manifest.KeyAccess();
+            keyAccess.url = "localhost:" + kasServer.getPort();
 
+            try {
+                services.kas().unwrap(keyAccess, "");
+            } catch (Exception ignoredException) {
+                // not going to bother making a real request with real crypto, just make sure that
+                // we have the right headers
+            }
             assertThat(kasDPoPHeader.get()).isNotNull();
             assertThat(kasAuthHeader.get()).isEqualTo("DPoP hereisthetoken");
         } finally {
@@ -180,7 +185,7 @@ public class SDKBuilderTest {
         }
     }
 
-    private static int getRandomPort() throws IOException {
+    public static int getRandomPort() throws IOException {
         int randomPort;
         try (ServerSocket socket = new ServerSocket(0)) {
             randomPort = socket.getLocalPort();

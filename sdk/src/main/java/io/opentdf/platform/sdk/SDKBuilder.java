@@ -11,7 +11,6 @@ import com.nimbusds.oauth2.sdk.auth.Secret;
 import com.nimbusds.oauth2.sdk.id.ClientID;
 import com.nimbusds.oauth2.sdk.id.Issuer;
 import com.nimbusds.openid.connect.sdk.op.OIDCProviderMetadata;
-import io.grpc.Channel;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.Status;
@@ -63,7 +62,7 @@ public class SDKBuilder {
         return this;
     }
 
-    private GRPCAuthInterceptor getGrpcAuthInterceptor() {
+    private GRPCAuthInterceptor getGrpcAuthInterceptor(RSAKey rsaKey) {
         if (platformEndpoint == null) {
             throw new SDKException("cannot build an SDK without specifying the platform endpoint");
         }
@@ -111,9 +110,13 @@ public class SDKBuilder {
             throw new SDKException("Error resolving the OIDC provider metadata", e);
         }
 
-        RSAKey rsaKey;
+        return new GRPCAuthInterceptor(clientAuth, rsaKey, providerMetadata.getTokenEndpointURI());
+    }
+
+    SDK.Services buildServices() {
+        RSAKey dpopKey;
         try {
-            rsaKey = new RSAKeyGenerator(2048)
+            dpopKey = new RSAKeyGenerator(2048)
                     .keyUse(KeyUse.SIGNATURE)
                     .keyID(UUID.randomUUID().toString())
                     .generate();
@@ -121,13 +124,9 @@ public class SDKBuilder {
             throw new SDKException("Error generating DPoP key", e);
         }
 
-        return new GRPCAuthInterceptor(clientAuth, rsaKey, providerMetadata.getTokenEndpointURI());
-    }
-
-    SDK.Services buildServices() {
-        var authInterceptor = getGrpcAuthInterceptor();
+        var authInterceptor = getGrpcAuthInterceptor(dpopKey);
         var channel = getManagedChannelBuilder().intercept(authInterceptor).build();
-        var client = new KASClient(getChannelFactory(authInterceptor));
+        var client = new KASClient(getChannelFactory(authInterceptor), dpopKey);
         return SDK.Services.newServices(channel, client);
     }
 
@@ -144,11 +143,11 @@ public class SDKBuilder {
         return channelBuilder;
     }
 
-    Function<SDK.KASInfo, Channel> getChannelFactory(GRPCAuthInterceptor authInterceptor) {
+    Function<String, ManagedChannel> getChannelFactory(GRPCAuthInterceptor authInterceptor) {
         var pt = usePlainText; // no need to have the builder be able to influence things from beyond the grave
-        return (SDK.KASInfo kasInfo) -> {
+        return (String url) -> {
             ManagedChannelBuilder<?> channelBuilder = ManagedChannelBuilder
-                    .forTarget(kasInfo.getAddress())
+                    .forTarget(url)
                     .intercept(authInterceptor);
             if (pt) {
                 channelBuilder = channelBuilder.usePlaintext();
