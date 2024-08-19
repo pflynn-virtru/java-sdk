@@ -193,20 +193,24 @@ public class SDKBuilder {
 
         var authInterceptor = getGrpcAuthInterceptor(dpopKey);
         ManagedChannel channel;
+        ManagedChannel attributesChannel;
         Function<String, ManagedChannel> managedChannelFactory;
         if (authInterceptor == null) {
             channel = getManagedChannelBuilder(platformEndpoint).build();
+            attributesChannel = getManagedChannelBuilder(platformEndpoint).build();
             managedChannelFactory = (String endpoint) -> getManagedChannelBuilder(endpoint).build();
 
         } else {
             channel = getManagedChannelBuilder(platformEndpoint).intercept(authInterceptor).build();
+            attributesChannel = getManagedChannelBuilder(platformEndpoint).intercept(authInterceptor).build();
             managedChannelFactory = (String endpoint) -> getManagedChannelBuilder(endpoint).intercept(authInterceptor).build();
         }
-        var client = new KASClient(managedChannelFactory, dpopKey);
+        var kasclient = new KASClient(managedChannelFactory, dpopKey);
+        var attrclient = new AttributesClient(attributesChannel);
         return new ServicesAndInternals(
                 authInterceptor,
                 sslFactory == null ? null : sslFactory.getTrustManager().orElse(null),
-                SDK.Services.newServices(channel, client)
+                SDK.Services.newServices(channel, kasclient, attrclient)
         );
     }
 
