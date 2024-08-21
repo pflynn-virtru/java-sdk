@@ -8,6 +8,12 @@ import com.nimbusds.jose.crypto.RSASSAVerifier;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 
+import io.opentdf.platform.policy.Value;
+import io.opentdf.platform.policy.attributes.AttributesServiceGrpc.AttributesServiceFutureStub;
+import io.opentdf.platform.sdk.Config.TDFConfig;
+import io.opentdf.platform.sdk.Autoconfigure.AttributeValueFQN;
+import io.opentdf.platform.sdk.Config.KASInfo;
+
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.crypto.MACSigner;
 import org.apache.commons.codec.DecoderException;
@@ -26,6 +32,7 @@ import java.security.*;
 import java.util.function.Consumer;
 import java.text.ParseException;
 import java.util.*;
+import java.util.concurrent.ExecutionException;
 
 public class TDF {
 
@@ -148,16 +155,16 @@ public class TDF {
             this.size = 0;
         }
 
-        PolicyObject createPolicyObject(List<String> attributes) {
+        PolicyObject createPolicyObject(List<Autoconfigure.AttributeValueFQN> attributes) {
             PolicyObject policyObject = new PolicyObject();
             policyObject.body = new PolicyObject.Body();
             policyObject.uuid = UUID.randomUUID().toString();
             policyObject.body.dataAttributes = new ArrayList<>();
             policyObject.body.dissem = new ArrayList<>();
 
-            for (String attribute: attributes) {
+            for (Autoconfigure.AttributeValueFQN attribute: attributes) {
                 PolicyObject.AttributeObject attributeObject = new PolicyObject.AttributeObject();
-                attributeObject.attribute = attribute;
+                attributeObject.attribute = attribute.toString();
                 policyObject.body.dataAttributes.add(attributeObject);
             }
             return policyObject;
@@ -172,12 +179,12 @@ public class TDF {
             String base64PolicyObject  = encoder.encodeToString(gson.toJson(policyObject).getBytes(StandardCharsets.UTF_8));
             List<byte[]> symKeys = new ArrayList<>();
             Map<String, Config.KASInfo> latestKASInfo = new HashMap<>();
-            if (tdfConfig.splitPlan.isEmpty()) {
+            if (tdfConfig.splitPlan == null || tdfConfig.splitPlan.isEmpty()) {
                 // Default split plan: Split keys across all KASes
-                List<Config.SplitStep> splitPlan = new ArrayList<>(tdfConfig.kasInfoList.size());
+                List<Autoconfigure.SplitStep> splitPlan = new ArrayList<>(tdfConfig.kasInfoList.size());
                 int i = 0;
                 for (Config.KASInfo kasInfo : tdfConfig.kasInfoList) {
-                    Config.SplitStep step = new Config.SplitStep(kasInfo.URL, "");
+                    Autoconfigure.SplitStep step = new Autoconfigure.SplitStep(kasInfo.URL, "");
                     if (tdfConfig.kasInfoList.size() > 1) {
                         step.splitID = String.format("s-%d", i++);
                     }
@@ -200,7 +207,7 @@ public class TDF {
             Map<String, List<Config.KASInfo>> conjunction = new HashMap<>();
             List<String> splitIDs = new ArrayList<>();
 
-            for (Config.SplitStep splitInfo : tdfConfig.splitPlan) {
+            for (Autoconfigure.SplitStep splitInfo : tdfConfig.splitPlan) {
                 // Public key was passed in with kasInfoList
                 // TODO First look up in attribute information / add to split plan?
                 Config.KASInfo ki = latestKASInfo.get(splitInfo.kas);
@@ -267,6 +274,7 @@ public class TDF {
                     keyAccess.policyBinding = policyBinding;
                     keyAccess.wrappedKey = encoder.encodeToString(wrappedKey);
                     keyAccess.encryptedMetadata = encryptedMetadata;
+                    keyAccess.sid = splitID;
 
                     manifest.encryptionInformation.keyAccessObj.add(keyAccess);
                 }
@@ -369,9 +377,30 @@ public class TDF {
 
     public TDFObject createTDF(InputStream payload,
                                OutputStream outputStream,
-                               Config.TDFConfig tdfConfig, SDK.KAS kas) throws IOException, JOSEException {
-        if (tdfConfig.kasInfoList.isEmpty()) {
-            throw new KasInfoMissing("kas information is missing");
+                               Config.TDFConfig tdfConfig, SDK.KAS kas, AttributesServiceFutureStub attrService) throws IOException, JOSEException, AutoConfigureException, InterruptedException, ExecutionException {
+
+        if (tdfConfig.autoconfigure) {
+            Autoconfigure.Granter granter = new Autoconfigure.Granter(new ArrayList<>());
+            if (tdfConfig.attributeValues != null && !tdfConfig.attributeValues.isEmpty()) {
+                granter = Autoconfigure.newGranterFromAttributes(tdfConfig.attributeValues.toArray(new Value[0]));
+            } else if (tdfConfig.attributes != null && !tdfConfig.attributes.isEmpty()) {
+                granter = Autoconfigure.newGranterFromService(attrService, tdfConfig.attributes.toArray(new AttributeValueFQN[0]));
+            }
+        
+            if (granter == null) {
+                throw new AutoConfigureException("Failed to create Granter"); // Replace with appropriate error handling
+            }
+        
+            List<String> dk = defaultKases(tdfConfig);
+            tdfConfig.splitPlan = granter.plan(dk, () -> UUID.randomUUID().toString());
+        
+            if (tdfConfig.splitPlan == null) {
+                throw new AutoConfigureException("Failed to generate Split Plan"); // Replace with appropriate error handling
+            }
+        }
+
+        if (tdfConfig.kasInfoList.isEmpty() && (tdfConfig.splitPlan==null || tdfConfig.splitPlan.isEmpty())) {
+            throw new KasInfoMissing("kas information is missing, no key access template specified or inferred");
         }
 
         TDFObject tdfObject = new TDFObject();
@@ -495,6 +524,23 @@ public class TDF {
         return tdfObject;
     }
 
+    public List<String> defaultKases(TDFConfig config) {
+        List<String> allk = new ArrayList<>();
+        List<String> defk = new ArrayList<>();
+
+        for (KASInfo kasInfo : config.kasInfoList) {
+            if (kasInfo.Default != null && kasInfo.Default) {
+                defk.add(kasInfo.URL);
+            } else if (defk.isEmpty()) {
+                allk.add(kasInfo.URL);
+            }
+        }
+        if (defk.isEmpty()) {
+            return allk;
+        }
+        return defk;
+    }
+
     private void fillInPublicKeyInfo(List<Config.KASInfo> kasInfoList, SDK.KAS kas) {
         for (var kasInfo: kasInfoList) {
             if (kasInfo.PublicKey != null && !kasInfo.PublicKey.isBlank()) {
@@ -517,7 +563,7 @@ public class TDF {
         
         Set<String> knownSplits = new HashSet<String>();
         Set<String> foundSplits = new HashSet<String>();;
-        Map<Config.SplitStep, Exception> skippedSplits = new HashMap<>();
+        Map<Autoconfigure.SplitStep, Exception> skippedSplits = new HashMap<>();
         boolean mixedSplits = manifest.encryptionInformation.keyAccessObj.size() > 1 &&
          (manifest.encryptionInformation.keyAccessObj.get(0).sid != null) &&
           !manifest.encryptionInformation.keyAccessObj.get(0).sid.isEmpty();
@@ -526,7 +572,7 @@ public class TDF {
 
         if (manifest.payload.isEncrypted) {
             for (Manifest.KeyAccess keyAccess: manifest.encryptionInformation.keyAccessObj) {
-                Config.SplitStep ss = new Config.SplitStep(keyAccess.url, keyAccess.sid);
+                Autoconfigure.SplitStep ss = new Autoconfigure.SplitStep(keyAccess.url, keyAccess.sid);
                 byte[] unwrappedKey;
                 if (!mixedSplits) {
                     unwrappedKey = kas.unwrap(keyAccess, manifest.encryptionInformation.policy);
@@ -569,7 +615,7 @@ public class TDF {
                 List<Exception> exceptionList = new ArrayList<>(skippedSplits.size() + 1);
                 exceptionList.add(new Exception("splitKey.unable to reconstruct split key: " + skippedSplits));
                 
-                for (Map.Entry<Config.SplitStep, Exception> entry : skippedSplits.entrySet()) {
+                for (Map.Entry<Autoconfigure.SplitStep, Exception> entry : skippedSplits.entrySet()) {
                     exceptionList.add(entry.getValue());
                 }
                 
