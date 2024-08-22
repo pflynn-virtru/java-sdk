@@ -31,8 +31,10 @@ import io.opentdf.platform.policy.attributes.GetAttributeValuesByFqnsResponse;
 import io.opentdf.platform.policy.attributes.GetAttributeValuesByFqnsResponse.AttributeAndValue;
 import io.opentdf.platform.policy.Attribute;
 import io.opentdf.platform.policy.Value;
+import io.opentdf.platform.policy.KasPublicKey;
 import io.opentdf.platform.policy.AttributeValueSelector;
 import io.opentdf.platform.policy.AttributeRuleTypeEnum;
+import io.opentdf.platform.policy.KasPublicKeyAlgEnum;
 
 // Attribute rule types: operators!
 class RuleType {
@@ -48,13 +50,18 @@ public class Autoconfigure {
 
     public static Logger logger = LoggerFactory.getLogger(Autoconfigure.class);
 
-    public static class SplitStep {
+    public static class KeySplitStep {
         public String kas;
         public String splitID;
 
-        public SplitStep(String kas, String splitId) {
+        public KeySplitStep(String kas, String splitId) {
             this.kas = kas;
             this.splitID = splitId;
+        }
+
+        @Override
+        public String toString() {
+            return "KeySplitStep{kas=" + this.kas + ", splitID=" + this.splitID + "}";
         }
 
         @Override
@@ -62,10 +69,10 @@ public class Autoconfigure {
             if (this == obj) {
                 return true;
             }
-            if (obj == null || !(obj instanceof SplitStep)) {
+            if (obj == null || !(obj instanceof KeySplitStep)) {
                 return false;
             }
-            SplitStep ss = (SplitStep) obj;
+            KeySplitStep ss = (KeySplitStep) obj;
             if ((this.kas.equals(ss.kas)) && (this.splitID.equals(ss.splitID))){
                 return true;
             }
@@ -287,7 +294,7 @@ public class Autoconfigure {
         }
 
 
-        public List<SplitStep> plan(List<String> defaultKas, Supplier<String> genSplitID) throws AutoConfigureException {
+        public List<KeySplitStep> plan(List<String> defaultKas, Supplier<String> genSplitID) throws AutoConfigureException {
             AttributeBooleanExpression b = constructAttributeBoolean();
             BooleanKeyExpression k = insertKeysForAttribute(b);
             if (k == null) {
@@ -301,21 +308,21 @@ public class Autoconfigure {
                 if (defaultKas.isEmpty()) {
                     throw new AutoConfigureException("no default KAS specified; required for grantless plans");
                 } else if (defaultKas.size() == 1) {
-                    return Collections.singletonList(new SplitStep(defaultKas.get(0), ""));
+                    return Collections.singletonList(new KeySplitStep(defaultKas.get(0), ""));
                 } else {
-                    List<SplitStep> result = new ArrayList<>();
+                    List<KeySplitStep> result = new ArrayList<>();
                     for (String kas : defaultKas) {
-                        result.add(new SplitStep(kas, genSplitID.get()));
+                        result.add(new KeySplitStep(kas, genSplitID.get()));
                     }
                     return result;
                 }
             }
 
-            List<SplitStep> steps = new ArrayList<>();
+            List<KeySplitStep> steps = new ArrayList<>();
             for (KeyClause v : k.values) {
                 String splitID = (l > 1) ? genSplitID.get() : "";
                 for (PublicKeyInfo o : v.values) {
-                    steps.add(new SplitStep(o.kas, splitID));
+                    steps.add(new KeySplitStep(o.kas, splitID));
                 }
             }
             return steps;
@@ -668,7 +675,7 @@ public class Autoconfigure {
     }
 
     // Gets a list of directory of KAS grants for a list of attribute FQNs
-    public static Granter newGranterFromService(AttributesServiceFutureStub as, AttributeValueFQN... fqns) throws AutoConfigureException, InterruptedException, ExecutionException {
+    public static Granter newGranterFromService(AttributesServiceFutureStub as, KASKeyCache keyCache, AttributeValueFQN... fqns) throws AutoConfigureException, InterruptedException, ExecutionException {
         String[] fqnsStr = new String[fqns.length];
         for (int i = 0; i < fqns.length; i++) {
             fqnsStr[i] = fqns[i].toString();
@@ -699,9 +706,11 @@ public class Autoconfigure {
             Value v = pair.getValue();
             if (v != null && !v.getGrantsList().isEmpty()) {
                 grants.addAllGrants(fqn, v.getGrantsList(), def);
+                storeKeysToCache(v.getGrantsList(), keyCache);
             } else {
               if (def != null) {
                   grants.addAllGrants(fqn, def.getGrantsList(), def);
+                  storeKeysToCache(def.getGrantsList(), keyCache);
               }
             }
         }
@@ -736,6 +745,36 @@ public class Autoconfigure {
         }
 
         return grants;
+    }
+
+    static void storeKeysToCache(List<KeyAccessServer> kases, KASKeyCache keyCache) {
+        for (KeyAccessServer kas : kases) {
+            List<KasPublicKey> keys = kas.getPublicKey().getCached().getKeysList();
+            if (keys.isEmpty()) {
+                logger.debug("No cached key in policy service for KAS: " + kas.getUri());
+                continue;
+            }
+            for (KasPublicKey ki : keys) {
+                Config.KASInfo kasInfo = new Config.KASInfo();
+                kasInfo.URL = kas.getUri();
+                kasInfo.KID = ki.getKid();
+                kasInfo.Algorithm = algProto2String(ki.getAlg());
+                kasInfo.PublicKey = ki.getPem();
+                keyCache.store(kasInfo);
+            }
+        }
+    }
+
+    private static String algProto2String(KasPublicKeyAlgEnum e) {
+        switch (e) {
+            case KAS_PUBLIC_KEY_ALG_ENUM_EC_SECP256R1:
+                return "ec:secp256r1";
+            case KAS_PUBLIC_KEY_ALG_ENUM_RSA_2048:
+                return "rsa:2048";
+            case KAS_PUBLIC_KEY_ALG_ENUM_UNSPECIFIED:
+            default:
+                return "";
+        }
     }
 
 }

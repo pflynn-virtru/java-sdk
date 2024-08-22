@@ -51,15 +51,13 @@ public class TDFTest {
         public void close() {}
 
         @Override
-        public String getPublicKey(Config.KASInfo kasInfo) {
+        public Config.KASInfo getPublicKey(Config.KASInfo kasInfo) {
             int index = Integer.parseInt(kasInfo.URL);
-
-            return CryptoUtils.getRSAPublicKeyPEM(keypairs.get(index).getPublic());
-        }
-
-        @Override
-        public String getKid(Config.KASInfo kasInfo) {
-            return "r1";
+            var kiCopy = new Config.KASInfo();
+            kiCopy.KID = "r1";
+            kiCopy.PublicKey = CryptoUtils.getRSAPublicKeyPEM(keypairs.get(index).getPublic());
+            kiCopy.URL = kasInfo.URL;
+            return kiCopy;
         }
 
         @Override
@@ -82,6 +80,11 @@ public class TDFTest {
         @Override
         public byte[] unwrapNanoTDF(NanoTDFType.ECCurve curve, String header, String kasURL) {
             return null;
+        }
+
+        @Override
+        public KASKeyCache getKeyCache(){
+            return new KASKeyCache();
         }
     };
 
