@@ -1,14 +1,11 @@
 name: Release
-
 on:
   push:
     branches:
       - main
-
 permissions:
   contents: read
   packages: write
-
 jobs:
   release-please:
     runs-on: ubuntu-latest
